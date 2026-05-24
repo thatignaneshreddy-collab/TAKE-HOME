@@ -1,0 +1,109 @@
+// This Prisma schema is the canonical source of truth for the inventory system.
+// Key design decisions:
+//   - Inventory is (productId, warehouseId) — never product-only
+//   - availableStock is NOT stored; it's computed as totalStock - reservedStock
+//   - Reservation status is a strict state machine: pending → confirmed | released
+//   - IdempotencyRecord enables safe retries without double side-effects
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Product {
+  id           String         @id @default(cuid())
+  name         String
+  sku          String         @unique
+  description  String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  inventory    Inventory[]
+  reservations Reservation[]
+
+  @@index([sku])
+}
+
+model Warehouse {
+  id           String         @id @default(cuid())
+  name         String
+  location     String
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  inventory    Inventory[]
+  reservations Reservation[]
+}
+
+// CRITICAL: Inventory lives at the (product, warehouse) level.
+// totalStock = units physically owned/in-system
+// reservedStock = units currently held by pending reservations
+// available = totalStock - reservedStock (computed, never stored)
+//
+// Uniqueness constraint on (productId, warehouseId) prevents phantom rows.
+model Inventory {
+  id            String    @id @default(cuid())
+  productId     String
+  warehouseId   String
+  totalStock    Int       @default(0)
+  reservedStock Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, warehouseId])
+  @@index([productId])
+  @@index([warehouseId])
+  // Check constraints enforced at DB level — belt and suspenders
+  // Prisma doesn't expose CHECK natively; we add via raw migration SQL
+}
+
+// Reservation is a strict state machine:
+//   pending   → confirmed  (stock permanently deducted)
+//   pending   → released   (stock freed, reservation cancelled)
+//   confirmed → (terminal, no further transitions)
+//   released  → (terminal, no further transitions)
+//
+// expired reservations are still status=pending until cleaned up;
+// expiresAt is the truth for whether a pending reservation is still valid.
+model Reservation {
+  id          String            @id @default(cuid())
+  productId   String
+  warehouseId String
+  quantity    Int
+  status      ReservationStatus @default(pending)
+  expiresAt   DateTime
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  product   Product   @relation(fields: [productId], references: [id])
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id])
+
+  @@index([status])
+  @@index([expiresAt])
+  @@index([productId, warehouseId, status])
+}
+
+enum ReservationStatus {
+  pending
+  confirmed
+  released
+}
+
+// Idempotency table for safe retries.
+// Keyed on (idempotencyKey). requestHash catches mismatched payloads
+// using the same key (which is a client bug, returns 422).
+model IdempotencyRecord {
+  id             String   @id @default(cuid())
+  idempotencyKey String   @unique
+  requestHash    String   // SHA-256 of method + path + body
+  response       Json     // stored response body
+  statusCode     Int
+  createdAt      DateTime @default(now())
+
+  @@index([idempotencyKey])
+}
