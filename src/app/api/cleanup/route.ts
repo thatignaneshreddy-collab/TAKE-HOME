@@ -21,9 +21,9 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { cleanupExpiredReservations } from "@/lib/services/inventory.service";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 export async function GET(request: NextRequest) {
   // Verify cron secret to prevent abuse
@@ -35,6 +35,9 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    const { cleanupExpiredReservations } = await import(
+      "@/lib/services/inventory.service"
+    );
     const released = await cleanupExpiredReservations();
 
     console.log(`[cron/cleanup] Released ${released} expired reservations`);
